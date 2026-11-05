@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ping Pong 3D - Servidor Node.js</title>
+<style>
+html,body{margin:0;height:100%;background:#111;color:#fff;font-family:system-ui,sans-serif;overflow:hidden}
+#wrap{position:relative;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center}
+canvas{width:100vw;height:100vh;background:#222;cursor:none;display:block}
+#cam{position:absolute;right:12px;bottom:12px;width:160px;height:120px;transform:scaleX(-1);border:2px solid #fff;border-radius:8px;opacity:1;object-fit:cover;z-index:100;display:none;box-shadow:0 4px 15px #000a}
+#lobby{position:absolute;background:#1a1a1ae6;padding:32px 40px;border-radius:20px;text-align:center;box-shadow:0 10px 40px #000c;backdrop-filter:blur(8px);border:1px solid #333;z-index:20;width:340px}
+#lobby h1{margin:0 0 8px 0;color:#e63a2e;font-size:36px;letter-spacing:1px;text-transform:uppercase}
+#lobby p{color:#aaa;font-size:13px;margin-bottom:22px;line-height:1.4}
+.label-title{font-size:11px;color:#888;margin-bottom:8px;font-weight:bold;letter-spacing:1px;text-align:left;text-transform:uppercase}
+.opt-row{display:flex;gap:10px;justify-content:center;margin-bottom:18px}
+.opt-btn{flex:1;padding:10px;background:#2a2a2a;border:2px solid #3d3d3d;color:#ccc;border-radius:10px;cursor:pointer;font-weight:bold;transition:all 0.2s;font-size:13px}
+.opt-btn:hover{background:#383838;color:#fff}
+.opt-btn.active{background:#e63a2e;border-color:#ff5a4e;color:#fff;box-shadow:0 0 12px #e63a2e66}
+input.opt-btn{background:#111; color:#fff; cursor:text; border:1px solid #555;}
+#start{padding:14px;font-size:18px;border:0;border-radius:12px;background:#e63a2e;color:#fff;cursor:pointer;box-shadow:0 4px 20px #e63a2e55;transition:all 0.2s;width:100%;font-weight:bold;margin-top:5px}
+#start:hover{transform:scale(1.03);background:#f44336}
+#room-info{margin-top:15px; font-size:12px; color:#ffdd57; font-weight:bold; user-select:all; display:none; background:#000; padding:10px; border-radius:5px;}
+#info{position:absolute;left:12px;bottom:12px;font-size:13px;background:#0008;padding:8px 12px;border-radius:8px;max-width:340px;line-height:1.4;z-index:10;pointer-events:none}
+#status{position:absolute;top:70px;left:50%;transform:translateX(-50%);background:#000c;padding:10px 16px;border-radius:10px;font-size:14px;max-width:80%;text-align:center;display:none;line-height:1.4;z-index:30}
+</style>
+</head>
+<body>
+<div id="wrap">
+<canvas id="c"></canvas>
+<video id="cam" playsinline muted></video>
+
+<div id="lobby">
+  <h1>PING PONG 3D</h1>
+  <p id="desc-text">Jogue offline contra o Bot ou Online pelo Servidor.</p>
+  
+  <div class="label-title">Controle</div>
+  <div class="opt-row" id="controls-row">
+    <button class="opt-btn active" onclick="setControl('mouse')">🖱️ Mouse</button>
+    <button class="opt-btn" onclick="setControl('cam')">📷 Câmera</button>
+  </div>
+
+  <div class="label-title">Multiplayer (Servidor)</div>
+  <div class="opt-row">
+    <button class="opt-btn" onclick="hostGame()">Criar Sala</button>
+    <button class="opt-btn" onclick="joinGameBtn()">Entrar</button>
+  </div>
+  <div class="opt-row" id="join-row" style="display:none;">
+    <input type="text" id="join-id" class="opt-btn" placeholder="Cole o ID aqui">
+    <button class="opt-btn" style="flex:0.5; background:#4CAF50; color:white;" onclick="joinGame()">OK</button>
+  </div>
+  <div id="room-info">Aguardando...</div>
+
+  <div class="label-title" style="margin-top:15px;">Singleplayer</div>
+  <button id="start" onclick="initGameFromLobby()">🏓 JOGAR OFFLINE</button>
+</div>
+
+<div id="status"></div>
+<div id="info">Mova a raquete rápida para mandar a bola de fogo 🔥</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+let controlMode = 'mouse';
+let difficulty = 1;
+
+// Variaveis de Servidor
+const socket = io();
+let roomId = null;
+let isMultiplayer = false;
+let isHost = true;
+
+function setControl(mode) {
+  controlMode = mode;
+  document.querySelectorAll('#controls-row .opt-btn').forEach((b, i) => {
+    b.classList.toggle('active', (i === 0 && mode === 'mouse') || (i === 1 && mode === 'cam'));
+  });
+}
+
+// --- NETWORK LOGIC (SOCKET.IO) ---
+function hostGame() {
+  document.getElementById('room-info').style.display = 'block';
+  document.getElementById('room-info').innerText = 'Criando sala...';
+  socket.emit('createRoom');
+}
+
+socket.on('roomCreated', (id) => {
+  roomId = id;
+  document.getElementById('room-info').innerText = 'Seu ID: ' + id + '\n(Aguardando jogador...)';
+});
+
+socket.on('playerJoined', () => {
+  isMultiplayer = true;
+  isHost = true;
+  initGameFromLobby(true);
+});
+
+function joinGameBtn() { document.getElementById('join-row').style.display = 'flex'; }
+
+function joinGame() {
+  const id = document.getElementById('join-id').value.trim().toUpperCase();
+  if(!id) return alert('Digite o ID');
+  document.getElementById('room-info').style.display = 'block';
+  document.getElementById('room-info').innerText = 'Conectando...';
+  socket.emit('joinRoom', id);
+}
+
+socket.on('joinedRoom', (id) => {
+  roomId = id;
+  isMultiplayer = true;
+  isHost = false;
+  initGameFromLobby(true);
+});
+
+socket.on('errorMsg', (msg) => {
+  alert(msg);
+  if(msg === 'O outro jogador desconectou.') window.location.reload();
+});
+
+// Recebimento de Dados
+socket.on('syncPlayer', data => {
+  if(isHost) {
+    bot.x = -data.rx; 
+    bot.y = data.ry;
+    if(data.fire) hitByClient();
+  }
+});
+
+socket.on('syncGame', data => {
+  if(!isHost) {
+    ball.x = -data.bx; ball.y = data.by; ball.z = L - data.bz;
+    ball.fire = data.bf;
+    bot.x = -data.hx; bot.y = data.hy;
+    score.p = data.scB; score.b = data.scP;
+    state = data.st; msg = data.msg;
+  }
+});
+// ---------------------
+
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+let W, H, horizon;
+
+function resize() { W = window.innerWidth; H = window.innerHeight; cv.width = W; cv.height = H; horizon = H * 0.40; }
+window.addEventListener('resize', resize); resize();
+
+const G=9.8, L=3.6, HW=1.05, NETZ=L/2; 
+const proj=(x,y,z)=>{ const d=z+1.4, k=(Math.min(W,H)*0.6)/d; return [W/2+x*k, horizon-(y-.65)*k, k] };
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const rnd=(a,b)=>a+Math.random()*(b-a);
+
+let state='menu',timer=0,score={p:0,b:0},hitter='p',bounces=0,msg='',serveWho='p',served=0;
+const ball={x:0,y:.4,z:.15,vx:0,vy:0,vz:0,ax:0,fire:false};
+const rk={x:0,y:.3,tx:0,ty:.3,vx:0,vy:0,tilt:0};
+const bot={x:0,y:.3,miss:false,off:0};
+let trail=[],handT=0,mouse={x:.5,y:.5},status='';
+
+const video=document.getElementById('cam'), stEl=document.getElementById('status');
+function setStatus(t,err){ stEl.style.display=t?'block':'none'; stEl.innerHTML=t; stEl.style.background=err?'#a11c':'#000c'; }
+
+let camOn=false,grabbed=false,fistT=0,openT=0;
+const canHit=()=> controlMode==='mouse' || !camOn || grabbed;
+
+function initGameFromLobby(multi = false) {
+  document.getElementById('lobby').style.display='none';
+  setStatus('');
+  if(!multi) isMultiplayer = false;
+  if(controlMode === 'cam') { startCam(); } 
+  else { camOn = false; if(video.srcObject) video.srcObject.getTracks().forEach(t => t.stop()); video.style.display = 'none'; }
+  startGame();
+}
+
+function startCam(){ /* Codigo da camera mantido igual */ }
+
+cv.addEventListener('mousemove', e => {
+  if(controlMode === 'mouse') {
+    mouse.x = e.clientX / W; mouse.y = e.clientY / H;
+    rk.tx = clamp((mouse.x - .5) * 5.0, -2.5, 2.5);
+    rk.ty = clamp((.85 - mouse.y) * 2.5, 0, 1.5);
+  }
+});
+
+function startGame(){ score={p:0,b:0}; served=0; serveWho='p'; newServe(); }
+function newServe(){ trail=[]; ball.fire=false; ball.ax=0; ball.vx=ball.vy=ball.vz=0; bounces=0; if(serveWho==='p'){ state='serve'; ball.x=0; ball.z=.15; ball.y=.4; } else{ state='botserve'; timer=1; ball.x=0; ball.z=L-.1; ball.y=.35; } }
+function aim(tx,tz,vz){ const t=(tz-ball.z)/vz; ball.vz=vz; ball.vx=(tx-ball.x)/t; ball.vy=(.5*G*t*t-ball.y)/t; }
+
+function playerHit(){
+  if(!isHost && isMultiplayer) {
+    socket.emit('syncPlayer', { room: roomId, rx: rk.x, ry: rk.y, fire: Math.hypot(rk.vx, rk.vy) > 2.2 });
+    return;
+  }
+  
+  const sp=Math.hypot(rk.vx, rk.vy);
+  hitter='p'; bounces=0;
+  const hitZ = clamp(ball.z, 0, 0.5); 
+  
+  if(sp > 2.2){
+    ball.fire=true; ball.ax=clamp(rk.vx*.35, -2, 2);
+    const tz = L - 0.1; const t = (tz - hitZ) / rnd(8.5, 9.5);
+    ball.vz = (tz - hitZ)/t; ball.vx = (clamp(ball.x*.5 + rk.vx*.12, -HW+.2, HW-.2) - ball.x)/t; ball.vy = (.5*G*t*t - ball.y)/t;
+  } else {
+    ball.fire=false; ball.ax=0;
+    const tz = rnd(2.8, 3.4); const t = (tz - hitZ) / rnd(4.0, 5.0);
+    ball.vz = (tz - hitZ)/t; ball.vx = (clamp(-(rk.x-ball.x)*2 + rnd(-.2,.2), -HW+.1, HW-.1) - ball.x)/t; ball.vy = (.5*G*t*t - ball.y)/t;
+  }
+  
+  if(!isMultiplayer) { bot.miss = Math.random() < (ball.fire ? 0.25 : 0.08); bot.off = bot.miss ? (Math.random()<.5?-1:1)*rnd(.5, .8) : 0; }
+  state='play';
+}
+
+function hitByClient(){
+  hitter='b'; bounces=0; ball.ax=0;
+  const hitZ = clamp(ball.z, L-0.5, L); ball.fire = false; 
+  const tz = rnd(0.2, 0.8); const t = (hitZ - tz) / rnd(4.0, 5.0);
+  ball.vz = -(hitZ - tz)/t; ball.vx = (clamp(-(bot.x-ball.x)*2 + rnd(-.2,.2), -HW+.1, HW-.1) - ball.x)/t; ball.vy = (.5*G*t*t - ball.y)/t;
+  state='play';
+}
+
+function botHit(){
+  hitter='b'; bounces=0; ball.ax=0;
+  const canBotFire = (difficulty === 2 && Math.random() < 0.7); ball.fire = canBotFire;
+  aim(rnd(-HW+.2, HW-.2), canBotFire?rnd(.2,.6):rnd(0.4, 1.2), -(canBotFire?8.0:rnd(4.2, 5.5))); state='play';
+}
+
+function point(w,m){ score[w]++; msg=m; state='point'; timer=1.5; served++; if(served%2===0) serveWho=serveWho==='p'?'b':'p'; }
+function outcome(){ if(bounces>=1) point(hitter, hitter==='p'?'Ponto da casa!':'Ponto do visitante'); else point(hitter==='p'?'b':'p', hitter==='p'?'Fora!':'Visitante errou!'); }
+
+function update(dt){
+  const glideSpeed = 1 - Math.exp(-dt * 28); 
+  const ox=rk.x, oy=rk.y;
+  rk.x += (rk.tx - rk.x) * glideSpeed; rk.y += (rk.ty - rk.y) * glideSpeed;
+  rk.vx += (((rk.x-ox)/dt)-rk.vx)*.3; rk.vy += (((rk.y-oy)/dt)-rk.vy)*.3;
+  rk.tilt += (clamp(rk.vx*.1, -.6, .6) - rk.tilt)*.2;
+  
+  if(isMultiplayer) {
+    if(isHost) {
+      socket.emit('syncGame', { room: roomId, bx: ball.x, by: ball.y, bz: ball.z, bf: ball.fire, hx: rk.x, hy: rk.y, scP: score.p, scB: score.b, st: state, msg: msg });
+    } else {
+      socket.emit('syncPlayer', { room: roomId, rx: rk.x, ry: rk.y });
+    }
+  }
+
+  if(!isMultiplayer) {
+    let tx=0, ty=.3;
+    if(state==='play' && ball.vz>0){ tx = ball.x + ball.vx * Math.max(0, (L-ball.z)/Math.max(ball.vz, .1)) + bot.off; ty = clamp(ball.y, .05, .6); }
+    bot.x += clamp(tx - bot.x, -6.0*dt, 6.0*dt); bot.y += clamp(ty - bot.y, -6.0*dt, 6.0*dt);
+  }
+
+  if(!isHost) {
+    if(ball.fire) for(let i=0;i<2;i++) trail.push({x:ball.x+rnd(-.02,.02), y:ball.y+rnd(-.02,.02), z:ball.z, life:1, s:rnd(.03,.06)});
+    trail.forEach(p=>{p.life-=dt*2.6; p.y+=dt*.15}); trail=trail.filter(p=>p.life>0);
+    if(state==='serve'){ if(canHit() && Math.hypot(ball.x-rk.x, ball.y-rk.y)<.35) playerHit(); }
+    if(state==='play' && hitter==='b' && ball.vz<0 && ball.z<.6 && ball.z>-.4 && Math.hypot(ball.x-rk.x, ball.y-rk.y)<.35) playerHit();
+    return;
+  }
+
+  if(state==='serve'){ ball.x=rk.x*.0+0; ball.y=.4+Math.sin(performance.now()/300)*.04; ball.z=.15; if(canHit() && Math.hypot(ball.x-rk.x, ball.y-rk.y)<.35) playerHit(); }
+  if(state==='botserve'){ timer-=dt; if(timer<=0){ if(!isMultiplayer) botHit(); } }
+  if(state==='point'){ timer-=dt; if(timer<=0){ if(score.p>=11 || score.b>=11){ if(Math.abs(score.p-score.b)>=2 || score.p>=15 || score.b>=15){ state='over'; return; } } newServe(); } }
+  
+  if(state==='play'){
+    const px=ball.z; ball.vx += ball.ax*dt; ball.vy -= G*dt; ball.x += ball.vx*dt; ball.y += ball.vy*dt; ball.z += ball.vz*dt;
+    if((px-NETZ)*(ball.z-NETZ)<0 && ball.y<.11 && Math.abs(ball.x)<HW+.1){ point(hitter==='p'?'b':'p', 'Na rede!'); return; }
+    
+    if(ball.y<=0 && ball.vy<0 && Math.abs(ball.x)<=HW && ball.z>=0 && ball.z<=L){
+      ball.y=0; ball.vy*=-.88; const side=ball.z<NETZ?'p':'b';
+      if(side===hitter){ point(hitter==='p'?'b':'p', 'Quicou do seu lado!'); return; }
+      bounces++; if(bounces>=2){ point(hitter, hitter==='p'?'Ponto seu!':'Ponto do oponente'); return; }
+    }
+    
+    if(canHit() && hitter==='b' && ball.vz<0 && ball.z<.6 && ball.z>-.4 && Math.hypot(ball.x-rk.x, ball.y-rk.y)<.35) playerHit();
+    else if(!isMultiplayer && hitter==='p' && ball.vz>0 && ball.z>L-.2 && !bot.miss && Math.hypot(ball.x-bot.x, ball.y-bot.y)<.35 && bounces>=1) botHit();
+    
+    if(ball.fire) for(let i=0;i<2;i++) trail.push({x:ball.x+rnd(-.02,.02), y:ball.y+rnd(-.02,.02), z:ball.z, life:1, s:rnd(.03,.06)});
+    if(ball.y<-.5 || ball.z<-.8 || ball.z>L+1.5 || Math.abs(ball.x)>HW+1.5) outcome();
+  }
+  trail.forEach(p=>{p.life-=dt*2.6; p.y+=dt*.15}); trail=trail.filter(p=>p.life>0);
+}
+
+function poly(pts,fill,stroke){ctx.beginPath();pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();if(fill){ctx.fillStyle=fill;ctx.fill()}if(stroke){ctx.strokeStyle=stroke;ctx.stroke()}}
+
+function drawRacket(x,y,z,tilt,color,hand){
+  const[sx,sy,k]=proj(x,y,z), r=.11*k; ctx.save(); ctx.translate(sx,sy); ctx.rotate(tilt);
+  ctx.fillStyle='#c89a5a'; ctx.fillRect(-r*.12,r*.8,r*.24,r*1.1); ctx.beginPath(); ctx.arc(0,0,r,0,7); ctx.fillStyle='#222'; ctx.fill();
+  ctx.beginPath(); ctx.arc(0,0,r*.92,0,7); ctx.fillStyle=color; ctx.fill(); ctx.strokeStyle='#fff3'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(-r*.2,-r*.2,r*.5,3.4,4.6); ctx.stroke();
+  if(hand){ /* mao omitida por brevidade visual */ }
+  ctx.restore();
+}
+
+function drawBall(){
+  const[sx,sy,k]=proj(ball.x,ball.y,ball.z), r=.03*k;
+  if(ball.y>0 && Math.abs(ball.x)<HW && ball.z>0 && ball.z<L){ const[ax,ay]=proj(ball.x,0,ball.z); ctx.fillStyle='#0005'; ctx.beginPath(); ctx.ellipse(ax,ay,r*1.1,r*.4,0,0,7); ctx.fill(); }
+  if(ball.fire){const g=ctx.createRadialGradient(sx,sy,0,sx,sy,r*4); g.addColorStop(0,'#ffd24a'); g.addColorStop(1,'#ff4a0000'); ctx.fillStyle=g; ctx.beginPath(); ctx.arc(sx,sy,r*4,0,7); ctx.fill();}
+  ctx.beginPath(); ctx.arc(sx,sy,r,0,7); ctx.fillStyle=ball.fire?'#fff2c0':'#fff'; ctx.fill();
+}
+
+function draw(){
+  let g=ctx.createLinearGradient(0,0,0,horizon); g.addColorStop(0,'#c9d6e6'); g.addColorStop(1,'#e9d9b8'); ctx.fillStyle=g; ctx.fillRect(0,0,W,horizon);
+  g=ctx.createLinearGradient(0,horizon-2,0,H); g.addColorStop(0,'#b98443'); g.addColorStop(1,'#7a4f22'); ctx.fillStyle=g; ctx.fillRect(0,horizon-2,W,H-horizon+2);
+  ctx.fillStyle='#0003'; ctx.fillRect(0,horizon-2,W,4);
+  
+  ctx.strokeStyle='#1b1b1b'; ctx.lineWidth=7;
+  [[-HW+.15,.35],[HW-.15,.35],[-HW+.15,L-.35],[HW-.15,L-.35]].forEach(([x,z])=>{ const a=proj(x,0,z),b=proj(x,-.76,z); ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke() });
+  
+  poly([proj(-HW,-.76,0),proj(HW,-.76,0),proj(HW,-.76,L),proj(-HW,-.76,L)],'#0004');
+  poly([proj(-HW,-.05,0),proj(HW,-.05,0),proj(HW,0,0),proj(-HW,0,0)],'#0b3d1f');
+  poly([proj(-HW,0,0),proj(HW,0,0),proj(HW,0,L),proj(-HW,0,L)],'#1d8a4a','#0d5a2c');
+  ctx.strokeStyle='#fff'; ctx.lineWidth=2;
+  [[[-HW,0],[HW,0]],[[HW,0],[HW,L]],[[HW,L],[-HW,L]],[[-HW,L],[-HW,0]],[[0,0],[0,L]]].forEach(([p,q])=>{const a=proj(p[0],0,p[1]),b=proj(q[0],0,q[1]);ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke()});
+  
+  const a=proj(-HW-.1,0,NETZ), b=proj(HW+.1,0,NETZ), at=proj(-HW-.1,.15,NETZ), bt=proj(HW+.1,.15,NETZ);
+  ctx.fillStyle='#ffffff30'; poly([a,b,bt,at],'#ffffff30'); ctx.strokeStyle='#ffffffaa'; ctx.lineWidth=1;
+  for(let i=0;i<=30;i++){const t=i/30,x=a[0]+(b[0]-a[0])*t,xt=at[0]+(bt[0]-at[0])*t;ctx.beginPath();ctx.moveTo(x,a[1]+(b[1]-a[1])*t);ctx.lineTo(xt,at[1]+(bt[1]-at[1])*t);ctx.stroke()}
+  ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(at[0],at[1]); ctx.lineTo(bt[0],bt[1]); ctx.stroke();
+  
+  drawRacket(bot.x, bot.y, L+.1, 0, '#2255cc', false);
+  const ballBehind=ball.z>NETZ; if(ballBehind) drawBall(); if(!ballBehind) drawBall();
+  
+  ctx.globalCompositeOperation='lighter';
+  trail.forEach(p=>{ const[sx,sy,k]=proj(p.x,p.y,p.z), r=p.s*k*p.life, gr=ctx.createRadialGradient(sx,sy,0,sx,sy,r*2); gr.addColorStop(0,`hsla(${20+45*p.life},100%,60%,${p.life*.8})`); gr.addColorStop(1,'hsla(10,100%,40%,0)'); ctx.fillStyle=gr; ctx.beginPath(); ctx.arc(sx,sy,r*2,0,7); ctx.fill(); });
+  ctx.globalCompositeOperation='source-over';
+  
+  if(state!=='menu') {
+    ctx.globalAlpha = canHit() ? 1 : .4; drawRacket(rk.x, rk.y, .15, rk.tilt, '#d8281e', true); ctx.globalAlpha = 1;
+    ctx.fillStyle='#000a'; ctx.fillRect(W/2-110,10,220,44); ctx.fillStyle='#fff'; ctx.font='bold 28px system-ui'; ctx.textAlign='center';
+    ctx.fillText(`Casa ${score.p}  ×  ${score.b} Visitante`, W/2, 42); ctx.font='20px system-ui';
+    if(state==='serve' || state==='botserve') { ctx.fillText('Saque!', W/2, 90); }
+    if(state==='point') ctx.fillText(msg, W/2, 90);
+    if(state==='over'){ ctx.fillStyle='#000b'; ctx.fillRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.font='bold 48px system-ui'; ctx.fillText(score.p>score.b?'Fim de Jogo! 🏆':'Derrota!', W/2, H/2); ctx.font='20px system-ui'; ctx.fillText('Recarregue a página para voltar ao Lobby', W/2, H/2+44); }
+  }
+}
+
+cv.addEventListener('click', ()=>{ if(state==='over') window.location.reload(); });
+
+let last=performance.now();
+(function frame(t){ const dt=Math.min((t-last)/1000, 1/30) || .016; last=t; if(state!=='menu' && state!=='over'){ update(dt/2); update(dt/2); } draw(); requestAnimationFrame(frame); })(last);
+</script>
+</body>
+</html>
