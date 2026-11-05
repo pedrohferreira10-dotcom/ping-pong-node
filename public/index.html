@@ -65,7 +65,6 @@ input.opt-btn{background:#111; color:#fff; cursor:text; border:1px solid #555;}
 let controlMode = 'mouse';
 let difficulty = 1;
 
-// Variaveis de Servidor
 const socket = io();
 let roomId = null;
 let isMultiplayer = false;
@@ -78,7 +77,6 @@ function setControl(mode) {
   });
 }
 
-// --- NETWORK LOGIC (SOCKET.IO) ---
 function hostGame() {
   document.getElementById('room-info').style.display = 'block';
   document.getElementById('room-info').innerText = 'Criando sala...';
@@ -118,12 +116,13 @@ socket.on('errorMsg', (msg) => {
   if(msg === 'O outro jogador desconectou.') window.location.reload();
 });
 
-// Recebimento de Dados
 socket.on('syncPlayer', data => {
   if(isHost) {
     bot.x = -data.rx; 
     bot.y = data.ry;
-    if(data.fire) hitByClient();
+    if(data.fire && (state === 'botserve' || (state === 'play' && hitter === 'p'))) {
+      hitByClient();
+    }
   }
 });
 
@@ -136,7 +135,6 @@ socket.on('syncGame', data => {
     state = data.st; msg = data.msg;
   }
 });
-// ---------------------
 
 const cv=document.getElementById('c'), ctx=cv.getContext('2d');
 let W, H, horizon;
@@ -170,7 +168,36 @@ function initGameFromLobby(multi = false) {
   startGame();
 }
 
-function startCam(){ /* Codigo da camera mantido igual */ }
+function startCam(){
+  if(!navigator.mediaDevices) return setStatus('Erro na câmera. Jogando no Mouse.', 1);
+  setStatus('Pedindo permissão...'); video.style.display='block';
+  navigator.mediaDevices.getUserMedia({video:{width:320,height:240,facingMode:'user'}}).then(async s=>{
+    video.srcObject=s; await new Promise(r=>video.onloadedmetadata=r); await video.play();
+    video.width=video.videoWidth; video.height=video.videoHeight;
+    setStatus('Carregando IA...');
+    const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`});
+    hands.setOptions({maxNumHands:1,modelComplexity:0,minDetectionConfidence:0.5,minTrackingConfidence:0.5});
+    hands.onResults(r=>{
+      if(controlMode !== 'cam') return;
+      const l=r.multiHandLandmarks&&r.multiHandLandmarks[0]; if(!l) return;
+      let sx=0,sy=0; [0,5,9,17].forEach(i=>{sx+=l[i].x; sy+=l[i].y});
+      rk.tx=clamp((1-sx/4-.5)*4.5, -2.0, 2.0); rk.ty=clamp((.85-sy/4)*2.0, 0, 1.2);
+      handT=performance.now();
+      const d=(a,b)=>Math.hypot(l[a].x-l[b].x, l[a].y-l[b].y);
+      let c=0; [[8,6],[12,10],[16,14],[20,18]].forEach(([t,p])=>{if(d(t,0)<d(p,0))c++});
+      const now=performance.now();
+      if(c>=3){openT=0; if(!fistT)fistT=now; if(now-fistT>30)grabbed=true}
+      else{fistT=0; if(!openT)openT=now; if(now-openT>40)grabbed=false}
+    });
+    await hands.initialize(); camOn=true;
+    setStatus('IA Pronta! Feche o punho ✊ para jogar.'); setTimeout(()=>setStatus(''), 4000);
+    async function detectLoop() {
+      if (controlMode==='cam' && video.readyState >= 2) { try { await hands.send({image: video}); } catch(e){} }
+      if(controlMode==='cam') requestAnimationFrame(detectLoop);
+    }
+    detectLoop();
+  }).catch(()=>{ setStatus('Câmera bloqueada. Mudando para Mouse.', 1); video.style.display='none'; controlMode = 'mouse'; setControl('mouse'); setTimeout(()=>setStatus(''), 4000); });
+}
 
 cv.addEventListener('mousemove', e => {
   if(controlMode === 'mouse') {
@@ -181,12 +208,32 @@ cv.addEventListener('mousemove', e => {
 });
 
 function startGame(){ score={p:0,b:0}; served=0; serveWho='p'; newServe(); }
-function newServe(){ trail=[]; ball.fire=false; ball.ax=0; ball.vx=ball.vy=ball.vz=0; bounces=0; if(serveWho==='p'){ state='serve'; ball.x=0; ball.z=.15; ball.y=.4; } else{ state='botserve'; timer=1; ball.x=0; ball.z=L-.1; ball.y=.35; } }
+
+function newServe(){ 
+  trail=[]; 
+  ball.fire=false; 
+  ball.ax=0; 
+  ball.vx=ball.vy=ball.vz=0; 
+  bounces=0; 
+  if(serveWho==='p'){ 
+    state='serve'; 
+    ball.x=0; 
+    ball.z=.15; 
+    ball.y=.4; 
+  } else { 
+    state='botserve'; 
+    timer=1; 
+    ball.x=0; 
+    ball.z=L-.1; 
+    ball.y=.35; 
+  } 
+}
+
 function aim(tx,tz,vz){ const t=(tz-ball.z)/vz; ball.vz=vz; ball.vx=(tx-ball.x)/t; ball.vy=(.5*G*t*t-ball.y)/t; }
 
 function playerHit(){
   if(!isHost && isMultiplayer) {
-    socket.emit('syncPlayer', { room: roomId, rx: rk.x, ry: rk.y, fire: Math.hypot(rk.vx, rk.vy) > 2.2 });
+    socket.emit('syncPlayer', { room: roomId, rx: rk.x, ry: rk.y, fire: true });
     return;
   }
   
@@ -222,7 +269,15 @@ function botHit(){
   aim(rnd(-HW+.2, HW-.2), canBotFire?rnd(.2,.6):rnd(0.4, 1.2), -(canBotFire?8.0:rnd(4.2, 5.5))); state='play';
 }
 
-function point(w,m){ score[w]++; msg=m; state='point'; timer=1.5; served++; if(served%2===0) serveWho=serveWho==='p'?'b':'p'; }
+function point(w,m){ 
+  score[w]++; 
+  msg=m; 
+  state='point'; 
+  timer=1.5; 
+  served++; 
+  if(served%2===0) serveWho=serveWho==='p'?'b':'p'; 
+}
+
 function outcome(){ if(bounces>=1) point(hitter, hitter==='p'?'Ponto da casa!':'Ponto do visitante'); else point(hitter==='p'?'b':'p', hitter==='p'?'Fora!':'Visitante errou!'); }
 
 function update(dt){
@@ -246,17 +301,37 @@ function update(dt){
     bot.x += clamp(tx - bot.x, -6.0*dt, 6.0*dt); bot.y += clamp(ty - bot.y, -6.0*dt, 6.0*dt);
   }
 
+  // O Cliente não executa fisica de movimento
   if(!isHost) {
     if(ball.fire) for(let i=0;i<2;i++) trail.push({x:ball.x+rnd(-.02,.02), y:ball.y+rnd(-.02,.02), z:ball.z, life:1, s:rnd(.03,.06)});
     trail.forEach(p=>{p.life-=dt*2.6; p.y+=dt*.15}); trail=trail.filter(p=>p.life>0);
-    if(state==='serve'){ if(canHit() && Math.hypot(ball.x-rk.x, ball.y-rk.y)<.35) playerHit(); }
-    if(state==='play' && hitter==='b' && ball.vz<0 && ball.z<.6 && ball.z>-.4 && Math.hypot(ball.x-rk.x, ball.y-rk.y)<.35) playerHit();
+    
+    // Verificação de batida do Cliente (Visão invertida)
+    if(state==='botserve'){ 
+      if(canHit() && Math.hypot((-ball.x)-rk.x, ball.y-rk.y)<.35) playerHit(); 
+    }
+    if(state==='play' && hitter==='p' && ball.vz>0 && (L-ball.z)<.6 && (L-ball.z)>-.4 && Math.hypot((-ball.x)-rk.x, ball.y-rk.y)<.35) {
+      playerHit();
+    }
     return;
   }
 
+  // Loop do Host / Singleplayer
   if(state==='serve'){ ball.x=rk.x*.0+0; ball.y=.4+Math.sin(performance.now()/300)*.04; ball.z=.15; if(canHit() && Math.hypot(ball.x-rk.x, ball.y-rk.y)<.35) playerHit(); }
-  if(state==='botserve'){ timer-=dt; if(timer<=0){ if(!isMultiplayer) botHit(); } }
-  if(state==='point'){ timer-=dt; if(timer<=0){ if(score.p>=11 || score.b>=11){ if(Math.abs(score.p-score.b)>=2 || score.p>=15 || score.b>=15){ state='over'; return; } } newServe(); } }
+  if(state==='botserve'){ ball.x=bot.x*.0+0; ball.y=.4+Math.sin(performance.now()/300)*.04; ball.z=L-.15; if(!isMultiplayer){ timer-=dt; if(timer<=0) botHit(); } }
+  
+  if(state==='point'){ 
+    timer-=dt; 
+    if(timer<=0){ 
+      if(score.p>=11 || score.b>=11){ 
+        if(Math.abs(score.p-score.b)>=2 || score.p>=15 || score.b>=15){ 
+          state='over'; 
+          return; 
+        } 
+      } 
+      newServe(); 
+    } 
+  }
   
   if(state==='play'){
     const px=ball.z; ball.vx += ball.ax*dt; ball.vy -= G*dt; ball.x += ball.vx*dt; ball.y += ball.vy*dt; ball.z += ball.vz*dt;
@@ -283,7 +358,6 @@ function drawRacket(x,y,z,tilt,color,hand){
   const[sx,sy,k]=proj(x,y,z), r=.11*k; ctx.save(); ctx.translate(sx,sy); ctx.rotate(tilt);
   ctx.fillStyle='#c89a5a'; ctx.fillRect(-r*.12,r*.8,r*.24,r*1.1); ctx.beginPath(); ctx.arc(0,0,r,0,7); ctx.fillStyle='#222'; ctx.fill();
   ctx.beginPath(); ctx.arc(0,0,r*.92,0,7); ctx.fillStyle=color; ctx.fill(); ctx.strokeStyle='#fff3'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(-r*.2,-r*.2,r*.5,3.4,4.6); ctx.stroke();
-  if(hand){ /* mao omitida por brevidade visual */ }
   ctx.restore();
 }
 
@@ -314,7 +388,7 @@ function draw(){
   ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(at[0],at[1]); ctx.lineTo(bt[0],bt[1]); ctx.stroke();
   
   drawRacket(bot.x, bot.y, L+.1, 0, '#2255cc', false);
-  const ballBehind=ball.z>NETZ; if(ballBehind) drawBall(); if(!ballBehind) drawBall();
+  drawBall();
   
   ctx.globalCompositeOperation='lighter';
   trail.forEach(p=>{ const[sx,sy,k]=proj(p.x,p.y,p.z), r=p.s*k*p.life, gr=ctx.createRadialGradient(sx,sy,0,sx,sy,r*2); gr.addColorStop(0,`hsla(${20+45*p.life},100%,60%,${p.life*.8})`); gr.addColorStop(1,'hsla(10,100%,40%,0)'); ctx.fillStyle=gr; ctx.beginPath(); ctx.arc(sx,sy,r*2,0,7); ctx.fill(); });
@@ -324,7 +398,8 @@ function draw(){
     ctx.globalAlpha = canHit() ? 1 : .4; drawRacket(rk.x, rk.y, .15, rk.tilt, '#d8281e', true); ctx.globalAlpha = 1;
     ctx.fillStyle='#000a'; ctx.fillRect(W/2-110,10,220,44); ctx.fillStyle='#fff'; ctx.font='bold 28px system-ui'; ctx.textAlign='center';
     ctx.fillText(`Casa ${score.p}  ×  ${score.b} Visitante`, W/2, 42); ctx.font='20px system-ui';
-    if(state==='serve' || state==='botserve') { ctx.fillText('Saque!', W/2, 90); }
+    if(state==='serve') { ctx.fillText('Seu Saque!', W/2, 90); }
+    if(state==='botserve') { ctx.fillText('Saque do Oponente!', W/2, 90); }
     if(state==='point') ctx.fillText(msg, W/2, 90);
     if(state==='over'){ ctx.fillStyle='#000b'; ctx.fillRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.font='bold 48px system-ui'; ctx.fillText(score.p>score.b?'Fim de Jogo! 🏆':'Derrota!', W/2, H/2); ctx.font='20px system-ui'; ctx.fillText('Recarregue a página para voltar ao Lobby', W/2, H/2+44); }
   }
